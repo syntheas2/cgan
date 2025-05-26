@@ -1,0 +1,8 @@
+.vscode
+*.csv
+*.json
+__pycache__
+*.pt
+*.pkl
+*.npy
+.env
