@@ -13,6 +13,7 @@ ReturnType = Tuple[
     Annotated[pd.DataFrame, "df_train"],
     Annotated[pd.DataFrame, "df_val"],
     Annotated[Any, "discrete_columns"],
+    Annotated[Any, "one_hot_columns"],
     ]
 
 @step
@@ -27,6 +28,7 @@ def load_data_step() -> ReturnType:
     df_val = artifact2.load()
     df_val.drop(columns=['id', 'combined_tks'], inplace=True)
 
-    discrete_columns = df_train.columns.to_list()
+    discrete_columns = set(['impact'])
+    one_hot_columns = set(df_train.columns.to_list()) - discrete_columns
 
-    return df_train, df_val, discrete_columns
+    return df_train, df_val, discrete_columns, one_hot_columns

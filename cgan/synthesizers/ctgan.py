@@ -10,7 +10,7 @@ from torch.nn import BatchNorm1d, Dropout, LeakyReLU, Linear, Module, ReLU, Sequ
 from tqdm import tqdm
 import math
 from cgan.data_sampler import DataSampler
-from cgan.data_transformer import DataTransformer
+from pythelpers.ml.data_transformer import DataTransformer
 from cgan.errors import InvalidDataError
 from cgan.synthesizers.base import BaseSynthesizer, random_state
 from cgan.data import get_train_z, get_sample_conditions

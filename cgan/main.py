@@ -10,7 +10,7 @@ from torch import optim
 from torch.nn import BatchNorm1d, Dropout, LeakyReLU, Linear, Module, ReLU, Sequential, functional
 from tqdm import tqdm
 from cgan.data_sampler import DataSampler
-from cgan.data_transformer import DataTransformer
+from pythelpers.ml.data_transformer import DataTransformer
 from cgan.errors import InvalidDataError
 from cgan.synthesizers.base import BaseSynthesizer, random_state
 from cgan.data import get_sample_conditions
@@ -25,6 +25,7 @@ import tempfile # For temporary file handling
 import pickle
 from zenml.logger import get_logger # ZenML's logger
 from pipelines.train_cgan_args import CGANArgs
+import json
 logger = get_logger(__name__) # Use ZenML's logger for the step
 
 import torch.serialization
@@ -284,6 +285,10 @@ class CGAN(BaseSynthesizer):
                     transformed = self._gumbel_softmax(data[:, st:ed], tau=0.2)
                     data_t.append(transformed)
                     st = ed
+                elif span_info.activation_fn == 'identity':
+                    ed = st + span_info.dim
+                    data_t.append(torch.sigmoid(data[:, st:ed]))
+                    st = ed
                 else:
                     raise ValueError(f'Unexpected activation function {span_info.activation_fn}.')
 
@@ -316,7 +321,7 @@ class CGAN(BaseSynthesizer):
 
 
     @random_state
-    def fit(self, run_id=None, train_data = None, data_transformer=None, df_val=None,  X_val=None,y_val=None, discrete_columns=(), discrete_condcolumns=(), config=None):
+    def fit(self, run_id=None, data_transformer=None, data_sampler=None, df_val=None,  X_val=None,y_val=None, config=None):
         """Fit the CTGAN Synthesizer models to the training data.
 
         Args:
@@ -333,17 +338,9 @@ class CGAN(BaseSynthesizer):
 
         epochs = config.epochs
 
-        self._transformer = data_transformer
+        self._transformer: DataTransformer = data_transformer
 
-        train_data = self._transformer.transform(train_data)
-
-        self._data_sampler = DataSampler(
-            train_data, 
-            self._transformer.output_info_list, 
-            self._log_frequency,
-            discrete_columns=discrete_columns,
-            cond_column_names=discrete_condcolumns
-        )
+        self._data_sampler = data_sampler
 
         self.data_dim = self._transformer.output_dimensions
 
@@ -472,7 +469,7 @@ class CGAN(BaseSynthesizer):
                     if condvec is None:
                         c1, m1, col, opt = None, None, None, None
                         real = self._data_sampler.sample_data(
-                            train_data, self._batch_size, col, opt
+                            self._batch_size, col, opt
                         )
                     else:
                         c1, m1, col, opt = condvec
@@ -483,7 +480,7 @@ class CGAN(BaseSynthesizer):
                         perm = np.arange(self._batch_size)
                         np.random.shuffle(perm)
                         real = self._data_sampler.sample_data(
-                            train_data, self._batch_size, col[perm], opt[perm]
+                            self._batch_size, col[perm], opt[perm]
                         )
                         c2 = c1[perm]
 
@@ -653,6 +650,12 @@ class CGAN(BaseSynthesizer):
         # Wiederherstellung der ursprünglichen Datenstruktur
         generated_data = generated_data[self.df_val.columns]
 
+        # --- Log value counts of 'impact' to MLflow ---
+        # impact_counts = generated_data['impact'].value_counts().to_dict()
+        # # Log as JSON string (preferred)
+        # mlflow.log_text(json.dumps(impact_counts), f"impact_value_counts_epoch_{epoch}.json")
+   
+
         # evaluate samples
         evaluate_samples(
             generated_data, self.df_val, epoch
@@ -724,7 +727,7 @@ class CGAN(BaseSynthesizer):
         # Wenn Generator Schwierigkeiten hat (Diskriminator zu stark)
         elif gd_performanceratio > 0.5:
             d_steps = base_steps
-            g_steps = base_steps + 1  # Ein Extra-Schritt für den Generator
+            g_steps = base_steps + 2  # 2 Extra-Schritt für den Generator
         else:
             d_steps = base_steps
             g_steps = base_steps

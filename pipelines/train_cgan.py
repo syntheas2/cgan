@@ -16,7 +16,11 @@ def train_cigan_pipeline():
     now = datetime.now() # Use current time for uniqueness
     timestamp_str = now.strftime("%Y-%m-%d_%H-%M-%S-%f")[:-3]
     mlflow.set_experiment(args.mlflow_experiment_name)
-    mlflow.set_tag("mlflow.runName", f"{args.mlflow_experiment_name}_{timestamp_str}")
+    mlflow.set_tag("mlflow.runName", f"{args.mlflow_run_name}_{timestamp_str}")
+    # --- Add run description from config as a tag ---
+    if hasattr(args, "mlflow_run_desc") and args.mlflow_run_desc:
+        mlflow.set_tag("mlflow.runDesc", str(args.mlflow_run_desc))
+
     if not args.bestmodels_runid:
         args.bestmodels_runid = mlflow.active_run().info.run_id
     
@@ -25,9 +29,13 @@ def train_cigan_pipeline():
     else:
         args.device = 'cpu'
 
-    df_train, df_val, discrete_columns = load_data_step()
-    X_val, y_val, data_transformer = prepare_data_step(
+    discrete_condcolumns=set(['impact'])
+    df_train, df_val, discrete_columns, one_hot_columns = load_data_step()
+    X_val, y_val, data_transformer, data_sampler = prepare_data_step(
+        args,
         discrete_columns=discrete_columns,
+        one_hot_columns=one_hot_columns,
+        discrete_condcolumns=discrete_condcolumns,  # Assuming 'impact' is the condition column
         df_train=df_train,
         df_val=df_val,
     )
@@ -35,10 +43,9 @@ def train_cigan_pipeline():
     # Step 2: Train and evaluate the VAE model
     return train_evaluate_cgan_step(
         config=args,
-        discrete_columns=discrete_columns,
         data_transformer=data_transformer,
+        data_sampler=data_sampler,
         df_val=df_val,
-        df_train=df_train,
         X_val=X_val,
         y_val=y_val
     )

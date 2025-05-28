@@ -16,9 +16,7 @@ ReturnType = Annotated[Dict[str, Any], "model_dict"] # Define return type for cl
 @step(enable_cache=False) # ZenML step decorator
 def train_evaluate_cgan_step(
     config: CGANArgs, # Your configuration class
-    discrete_columns=None,
-    data_transformer=None, df_val=None,
-    df_train=None,
+    data_transformer=None, data_sampler=None, df_val=None,
      X_val=None, y_val=None
 ) -> ReturnType: # Returns path to the best model's state_dict (ZenML output)
 
@@ -35,9 +33,6 @@ def train_evaluate_cgan_step(
     logger.info(f"Starting CIGAN training on device: {config.device}. MLflow autologging enabled.")
     # Log all config parameters manually
     mlflow.log_params(config.model_dump())
-
-    # only impact as cond
-    discrete_condcolumns = ['impact']
 
     generator_dim = [int(x) for x in config.generator_dim.split(',')]
     discriminator_dim = [int(x) for x in config.discriminator_dim.split(',')]
@@ -56,7 +51,7 @@ def train_evaluate_cgan_step(
         device=config.device,
         config=config,
     )
-    best_model_data_to_save = model.fit(run_id, df_train, data_transformer, df_val, X_val, y_val,  discrete_columns=discrete_columns, discrete_condcolumns=discrete_condcolumns,  config=config)
+    best_model_data_to_save = model.fit(run_id, data_transformer, data_sampler, df_val, X_val, y_val, config=config)
 
 
 

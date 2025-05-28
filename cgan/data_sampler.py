@@ -7,6 +7,7 @@ class DataSampler(object):
     """DataSampler samples the conditional vector and corresponding data for CTGAN."""
 
     def __init__(self, data, output_info, log_frequency, discrete_columns=None, cond_column_names=None):
+        self.data = data
         self._data_length = len(data)
 
         # Speichere die Namen aller diskreten Spalten und der Konditionierungsspalten
@@ -153,7 +154,7 @@ class DataSampler(object):
 
         return cond
 
-    def sample_data(self, data, n, col, opt):
+    def sample_data(self, n, col, opt):
         """Sample data from original training data satisfying the sampled conditional vector.
 
         Args:
@@ -165,14 +166,14 @@ class DataSampler(object):
                 n rows of matrix data.
         """
         if col is None:
-            idx = np.random.randint(len(data), size=n)
-            return data[idx]
+            idx = np.random.randint(len(self.data), size=n)
+            return self.data[idx]
 
         idx = []
         for c, o in zip(col, opt):
             idx.append(np.random.choice(self._rid_by_cat_cols[c][o]))
 
-        return data[idx]
+        return self.data[idx]
 
     def dim_cond_vec(self):
         """Return the total number of categories."""

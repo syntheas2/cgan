@@ -9,7 +9,9 @@ import torch.nn as nn
 from cgan.data import get_sample_conditions
 from cgan.utils_evaluation import transform_val_data
 from cgan.utils import validate_discrete_columns, validate_null_data
-from cgan.data_transformer import DataTransformer
+from pythelpers.ml.data_transformer import DataTransformer
+from pipelines.train_cgan_args import CGANArgs
+from cgan.data_sampler import DataSampler
 # import vae_syntheas
 # at first try train tabsyn
 
@@ -17,16 +19,27 @@ ReturnType = Tuple[
     Annotated[Any, "X_val"],
     Annotated[Any, "y_val"],
     Annotated[Any, "data_transformer"],
+    Annotated[Any, "data_sampler"],
     ]
 
 @step
-def prepare_data_step(discrete_columns, df_train, df_val) -> ReturnType:
+def prepare_data_step(config: CGANArgs, discrete_columns, one_hot_columns, discrete_condcolumns, df_train, df_val) -> ReturnType:
     X_val, y_val = transform_val_data(df_val)
 
     validate_discrete_columns(df_train, discrete_columns)
     validate_null_data(df_train, discrete_columns)
 
     data_transformer = DataTransformer()
-    data_transformer.fit(df_train, discrete_columns)
+    data_transformer.fit(df_train, discrete_columns, one_hot_columns)
 
-    return X_val, y_val, data_transformer
+    df_train_transformed = data_transformer.transform(df_train)
+
+    data_sampler = DataSampler(
+        df_train_transformed, 
+        data_transformer.output_info_list, 
+        config.log_frequency,
+        discrete_columns=discrete_columns,
+        cond_column_names=discrete_condcolumns
+    )
+
+    return X_val, y_val, data_transformer, data_sampler
