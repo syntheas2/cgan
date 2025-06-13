@@ -3,14 +3,14 @@ from zenml import pipeline
 import mlflow  # Import the mlflow library
 from datetime import datetime # For the run description
 import torch
-from steps.load_data import load_data_step
-from steps.train_cgan_step import train_evaluate_cgan_step
+from steps.load_data import load_data4sample_step
+from steps.sample import sample_step
 from steps.prepare_data import prepare_data_step
-from pipelines.train_cgan_args import CGANArgs
+from pipelines.sample_cgan_args import CGANArgs
 
 
 @pipeline
-def train_cigan_pipeline():
+def sample_cigan_pipeline():
     args = CGANArgs()
     # --- Set the MLflow run name using a tag ---
     now = datetime.now() # Use current time for uniqueness
@@ -20,35 +20,25 @@ def train_cigan_pipeline():
     # --- Add run description from config as a tag ---
     if hasattr(args, "mlflow_run_desc") and args.mlflow_run_desc:
         mlflow.set_tag("mlflow.runDesc", str(args.mlflow_run_desc))
-
-    if not args.bestmodels_runid:
-        args.bestmodels_runid = mlflow.active_run().info.run_id
     
     if torch.cuda.is_available():
         args.device = f'cuda:{args.gpu}'
     else:
         args.device = 'cpu'
 
-    discrete_condcolumns=set(['impact'])
-    df_train, df_val, discrete_columns = load_data_step()
-    data_transformer, data_sampler, np_val_transformed = prepare_data_step(
+
+
+    generator, transformer, discrete_column_category_prob_flatten, discrete_column_matrix_st, n_categories, orig_columns = load_data4sample_step(args)
+    df_syn = sample_step(
         args,
-        discrete_columns=discrete_columns,
-        discrete_condcolumns=discrete_condcolumns,  # Assuming 'impact' is the condition column
-        df_train=df_train,
-        df_val=df_val,
+        generator,
+        transformer, discrete_column_category_prob_flatten, discrete_column_matrix_st, n_categories, orig_columns
     )
 
-    # Step 2: Train and evaluate the VAE model
-    return train_evaluate_cgan_step(
-        config=args,
-        data_transformer=data_transformer,
-        data_sampler=data_sampler,
-        np_val_transformed=np_val_transformed,
-    )
+    return df_syn
 
 
 if __name__ == "__main__":
-    train_cigan_pipeline.with_options(
+    sample_cigan_pipeline.with_options(
         # enable_cache=False  
     )()

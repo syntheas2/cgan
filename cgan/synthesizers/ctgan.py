@@ -8,7 +8,6 @@ import torch
 from torch import optim
 from torch.nn import BatchNorm1d, Dropout, LeakyReLU, Linear, Module, ReLU, Sequential, functional
 from tqdm import tqdm
-import math
 from cgan.data_sampler import DataSampler
 from pythelpers.ml.data_transformer import DataTransformer
 from cgan.errors import InvalidDataError

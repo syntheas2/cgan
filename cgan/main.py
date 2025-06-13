@@ -14,7 +14,7 @@ from pythelpers.ml.data_transformer import DataTransformer
 from cgan.errors import InvalidDataError
 from cgan.synthesizers.base import BaseSynthesizer, random_state
 from cgan.data import get_sample_conditions
-from cgan.utils import split_num_cat_target, recover_data
+from cgan.utils import sample_original_condvec, apply_activate, generate_cond_from_condition_column_info
 from cgan.utils_evaluation import transform_val_data
 from pythelpers.ml.mlflow import load_latest_checkpoint, rotate_checkpoints, rotate_bestmodels
 from pythelpers.ml.nn import StepLRScheduler
@@ -26,6 +26,9 @@ import pickle
 from zenml.logger import get_logger # ZenML's logger
 from pipelines.train_cgan_args import CGANArgs
 import json
+from dataclasses import dataclass
+from dataclasses import asdict
+
 logger = get_logger(__name__) # Use ZenML's logger for the step
 
 import torch.serialization
@@ -96,11 +99,29 @@ class Residual(Module):
         return torch.cat([out, input_], dim=1)
 
 
+
+@dataclass
+class GeneratorArgs:
+    embedding_dim: int
+    generator_dim: tuple  # or list[int]
+    data_dim: int
+    base_embdim: int
+    batch_size: int
+    device: str = 'cpu'
+
 class Generator(Module):
     """Generator for the CTGAN."""
 
-    def __init__(self, embedding_dim, generator_dim, data_dim):
+    def __init__(self, embedding_dim, generator_dim, data_dim, base_embdim, batch_size, device='cpu'):
         super(Generator, self).__init__()
+        self.args = GeneratorArgs(
+            embedding_dim=embedding_dim,
+            generator_dim=generator_dim,
+            data_dim=data_dim,
+            base_embdim=base_embdim,
+            batch_size=batch_size,
+            device=device
+        )
         dim = embedding_dim
         seq = []
         for item in list(generator_dim):
@@ -112,6 +133,63 @@ class Generator(Module):
     def forward(self, input_):
         """Apply the Generator to the `input_`."""
         data = self.seq(input_)
+        return data
+    
+    def sample(self, n, discrete_column_category_prob_flatten, n_categories, discrete_column_matrix_st, transformer, condition_column=None, condition_value=None):
+        """Sample data similar to the training data.
+
+        Choosing a condition_column and condition_value will increase the probability of the
+        discrete condition_value happening in the condition_column.
+
+        Args:
+            n (int):
+                Number of rows to sample.
+            condition_column (string):
+                Name of a discrete column.
+            condition_value (string):
+                Name of the category in the condition_column which we wish to increase the
+                probability of happening.
+
+        Returns:
+            numpy.ndarray or pandas.DataFrame
+        """
+        if condition_column is not None and condition_value is not None:
+            condition_info = transformer.convert_column_name_value_to_id(
+                condition_column, condition_value
+            )
+            global_condition_vec = generate_cond_from_condition_column_info(
+                condition_info, self.args.batch_size, n_categories, discrete_column_matrix_st
+            )
+        else:
+            global_condition_vec = None
+
+        steps = n // self.args.batch_size + 1
+        data = []
+        for i in range(steps):
+            # fakez_gmm = self.generate_gmm_noise(self._batch_size, self._embedding_dim)
+            mean = torch.zeros(self.args.batch_size, self.args.base_embdim)
+            std = mean + 1
+            fakez = torch.normal(mean=mean, std=std).to(self.args.device)
+
+            if global_condition_vec is not None:
+                condvec = global_condition_vec.copy()
+            else:
+                condvec = sample_original_condvec(self.args.batch_size, discrete_column_category_prob_flatten, n_categories)
+
+            if condvec is None:
+                pass
+            else:
+                c1 = condvec
+                c1 = torch.from_numpy(c1).to(self.args.device)
+                fakez = torch.cat([fakez, c1], dim=1)
+
+            fake = self(fakez)
+            fakeact = apply_activate(fake, transformer)
+            data.append(fakeact.detach().cpu().numpy())
+
+        data = np.concatenate(data, axis=0)
+        data = data[:n]
+
         return data
 
 
@@ -242,57 +320,6 @@ class CGAN(BaseSynthesizer):
 
 
 
-    @staticmethod
-    def _gumbel_softmax(logits, tau=1, hard=False, eps=1e-10, dim=-1):
-        """Deals with the instability of the gumbel_softmax for older versions of torch.
-
-        For more details about the issue:
-        https://drive.google.com/file/d/1AA5wPfZ1kquaRtVruCd6BiYZGcDeNxyP/view?usp=sharing
-
-        Args:
-            logits […, num_features]:
-                Unnormalized log probabilities
-            tau:
-                Non-negative scalar temperature
-            hard (bool):
-                If True, the returned samples will be discretized as one-hot vectors,
-                but will be differentiated as if it is the soft sample in autograd
-            dim (int):
-                A dimension along which softmax will be computed. Default: -1.
-
-        Returns:
-            Sampled tensor of same shape as logits from the Gumbel-Softmax distribution.
-        """
-        for _ in range(10):
-            transformed = functional.gumbel_softmax(logits, tau=tau, hard=hard, eps=eps, dim=dim)
-            if not torch.isnan(transformed).any():
-                return transformed
-
-        raise ValueError('gumbel_softmax returning NaN.')
-
-    def _apply_activate(self, data):
-        """Apply proper activation function to the output of the generator."""
-        data_t = []
-        st = 0
-        for column_info in self._transformer.output_info_list:
-            for span_info in column_info:
-                if span_info.activation_fn == 'tanh':
-                    ed = st + span_info.dim
-                    data_t.append(torch.tanh(data[:, st:ed]))
-                    st = ed
-                elif span_info.activation_fn == 'softmax':
-                    ed = st + span_info.dim
-                    transformed = self._gumbel_softmax(data[:, st:ed], tau=0.2)
-                    data_t.append(transformed)
-                    st = ed
-                elif span_info.activation_fn == 'identity':
-                    ed = st + span_info.dim
-                    data_t.append(torch.sigmoid(data[:, st:ed]))
-                    st = ed
-                else:
-                    raise ValueError(f'Unexpected activation function {span_info.activation_fn}.')
-
-        return torch.cat(data_t, dim=1)
 
     def _cond_loss(self, data, c, m):
         """Compute the cross entropy loss on the fixed discrete column."""
@@ -321,7 +348,7 @@ class CGAN(BaseSynthesizer):
 
 
     @random_state
-    def fit(self, run_id=None, data_transformer=None, data_sampler=None, df_val=None,  X_val=None,y_val=None, config=None):
+    def fit(self, run_id=None, data_transformer=None, data_sampler=None, np_val_transformed=None, config=None):
         """Fit the CTGAN Synthesizer models to the training data.
 
         Args:
@@ -333,19 +360,19 @@ class CGAN(BaseSynthesizer):
                 contain the integer indices of the columns. Otherwise, if it is
                 a ``pandas.DataFrame``, this list should contain the column names.
         """
-        self.X_val, self.y_val = X_val, y_val
-        self.df_val = df_val
+        self._transformer: DataTransformer = data_transformer
+        self.X_val, self.y_val = self._transformer.get_x_y(np_val_transformed)
+        self.np_val_transformed = np_val_transformed
 
         epochs = config.epochs
 
-        self._transformer: DataTransformer = data_transformer
 
-        self._data_sampler = data_sampler
+        self._data_sampler : DataSampler = data_sampler
 
         self.data_dim = self._transformer.output_dimensions
 
         self._generator = Generator(
-            self._embedding_dim + self._data_sampler.dim_cond_vec(), self._generator_dim, self.data_dim
+            self._embedding_dim + self._data_sampler.dim_cond_vec(), self._generator_dim, self.data_dim, self._embedding_dim, self._batch_size
         ).to(self._device)
 
         discriminator = Discriminator(
@@ -373,6 +400,7 @@ class CGAN(BaseSynthesizer):
         # load checkpoint if provided
         start_epoch = 0
         generator_loss, discriminator_loss = None, None
+        self.best_linearsvc_acc = 0
         if config.load_from_checkpoint:
             ckp_run_id = config.load_ckp_from_run_id
             if ckp_run_id:
@@ -435,6 +463,8 @@ class CGAN(BaseSynthesizer):
         
         g_stepcount = 0
         d_stepcount = 0
+        best_linearsvc_acc_old = self.best_linearsvc_acc
+        self.linear_svc_acc_current = 0
 
         for i in epoch_iterator:
             # Bestimme die Anzahl der Trainingsschritte basierend auf aktueller Performance
@@ -485,7 +515,7 @@ class CGAN(BaseSynthesizer):
                         c2 = c1[perm]
 
                     fake = self._generator(fakez)
-                    fakeact = self._apply_activate(fake)
+                    fakeact = apply_activate(fake, self._transformer)
 
                     real = torch.from_numpy(real.astype('float32')).to(self._device)
 
@@ -527,7 +557,7 @@ class CGAN(BaseSynthesizer):
                         fakez = torch.cat([fakez, c1], dim=1)
 
                     fake = self._generator(fakez)
-                    fakeact = self._apply_activate(fake)
+                    fakeact = apply_activate(fake, self._transformer)
 
                     if c1 is not None:
                         y_fake = discriminator(torch.cat([fakeact, c1], dim=1))
@@ -623,50 +653,53 @@ class CGAN(BaseSynthesizer):
                     artifact_subdir=config.manual_checkpoint_subdir,
                     max_checkpoints=config.max_checkpoints_to_keep
                 )
-                bestmodel_filename = f"model_acc_{self.best_linearsvc_acc:.3f}.pt" # Padded epoch for sorting
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    local_tmp_checkpoint_path = Path(tmpdir) / bestmodel_filename
-                    torch.save(checkpoint_state, local_tmp_checkpoint_path)
-                    
-                    mlflow.log_artifact(
-                        str(local_tmp_checkpoint_path), 
-                        artifact_path=f"{config.manual_bestmodel_subdir}",
-                        run_id=config.bestmodels_runid
+                if self.linear_svc_acc_current >= best_linearsvc_acc_old:
+                    bestmodel_filename = f"model_acc_{self.best_linearsvc_acc:.3f}.pt" # Padded epoch for sorting
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        local_tmp_checkpoint_path = Path(tmpdir) / bestmodel_filename
+                        bestmodel_state: Dict[str, Any] =  {
+                        'generator_state_dict': self._generator.state_dict(),
+                        'transformer_pkl': pickle.dumps(self._transformer),
+                        'config': {
+                            'generator_kwargs': asdict(self._generator.args),
+                            'discrete_column_category_prob_flatten_pkl': pickle.dumps(self._data_sampler._discrete_column_category_prob.flatten()),
+                            'discrete_column_matrix_st_pkl': pickle.dumps(self._data_sampler._discrete_column_matrix_st),
+                            'n_categories': self._data_sampler._n_categories,
+                            }
+                        }
+                        torch.save(bestmodel_state, local_tmp_checkpoint_path)
+                        
+                        mlflow.log_artifact(
+                            str(local_tmp_checkpoint_path), 
+                            artifact_path=f"{config.manual_bestmodel_subdir}",
+                            run_id=config.bestmodels_runid
+                        )
+                    rotate_bestmodels(
+                        run_id=config.bestmodels_runid,
+                        metric='acc',
+                        maximize=True,
+                        artifact_subdir=config.manual_bestmodel_subdir,
+                        max=config.max_bestmodel_to_keep,
                     )
-                rotate_bestmodels(
-                    run_id=config.bestmodels_runid,
-                    metric='acc',
-                    maximize=True,
-                    artifact_subdir=config.manual_bestmodel_subdir,
-                    max=config.max_bestmodel_to_keep,
-                )
-                logger.info(f"Saved manual best model to MLflow: {config.manual_bestmodel_subdir}")
+                    logger.info(f"Saved manual best model to MLflow: {config.manual_bestmodel_subdir}")
+                    best_linearsvc_acc_old = self.linear_svc_acc_current
 
     def evaluate(self, epoch):
         """Evaluate the model on the test data."""
         # generate samples
-        generated_data = self.sample(10000)
-
-        # Wiederherstellung der ursprünglichen Datenstruktur
-        generated_data = generated_data[self.df_val.columns]
-
-        # --- Log value counts of 'impact' to MLflow ---
-        # impact_counts = generated_data['impact'].value_counts().to_dict()
-        # # Log as JSON string (preferred)
-        # mlflow.log_text(json.dumps(impact_counts), f"impact_value_counts_epoch_{epoch}.json")
-   
+        generated_data_transformed = self.sample(10000)
 
         # evaluate samples
         evaluate_samples(
-            generated_data, self.df_val, epoch
+            self._transformer.transformed_data2_dataframe(generated_data_transformed), self._transformer.transformed_data2_dataframe(self.np_val_transformed), epoch
         )
         
 
         # evaluate linear SVC performance
-        X_train, y_train = get_x_y(generated_data)
-        acc, _ = evaluate_linearsvc_performance(X_train, y_train, self.X_val, self.y_val, epoch)
-        if acc > self.best_linearsvc_acc:
-            self.best_linearsvc_acc = acc
+        X_train, y_train = self._transformer.get_x_y(generated_data_transformed)
+        self.linear_svc_acc_current, _ = evaluate_linearsvc_performance(X_train, y_train, self.X_val, self.y_val, epoch)
+        if self.linear_svc_acc_current > self.best_linearsvc_acc:
+            self.best_linearsvc_acc = self.linear_svc_acc_current
 
 
     def generate_gmm_noise(self, batch_size, embedding_dim):
@@ -753,44 +786,15 @@ class CGAN(BaseSynthesizer):
         Returns:
             numpy.ndarray or pandas.DataFrame
         """
-        if condition_column is not None and condition_value is not None:
-            condition_info = self._transformer.convert_column_name_value_to_id(
-                condition_column, condition_value
-            )
-            global_condition_vec = self._data_sampler.generate_cond_from_condition_column_info(
-                condition_info, self._batch_size
-            )
-        else:
-            global_condition_vec = None
-
-        steps = n // self._batch_size + 1
-        data = []
-        for i in range(steps):
-            # fakez_gmm = self.generate_gmm_noise(self._batch_size, self._embedding_dim)
-            mean = torch.zeros(self._batch_size, self._embedding_dim)
-            std = mean + 1
-            fakez = torch.normal(mean=mean, std=std).to(self._device)
-
-            if global_condition_vec is not None:
-                condvec = global_condition_vec.copy()
-            else:
-                condvec = self._data_sampler.sample_original_condvec(self._batch_size)
-
-            if condvec is None:
-                pass
-            else:
-                c1 = condvec
-                c1 = torch.from_numpy(c1).to(self._device)
-                fakez = torch.cat([fakez, c1], dim=1)
-
-            fake = self._generator(fakez)
-            fakeact = self._apply_activate(fake)
-            data.append(fakeact.detach().cpu().numpy())
-
-        data = np.concatenate(data, axis=0)
-        data = data[:n]
-
-        return self._transformer.inverse_transform(data)
+        return self._generator.sample(
+            n,
+            self._data_sampler._discrete_column_category_prob.flatten(),
+            self._data_sampler._n_categories,
+            self._data_sampler._discrete_column_matrix_st,
+            self._transformer,
+            condition_column=condition_column,
+            condition_value=condition_value
+        )
 
     def set_device(self, device):
         """Set the `device` to be used ('GPU' or 'CPU)."""

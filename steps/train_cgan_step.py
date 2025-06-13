@@ -16,8 +16,7 @@ ReturnType = Annotated[Dict[str, Any], "model_dict"] # Define return type for cl
 @step(enable_cache=False) # ZenML step decorator
 def train_evaluate_cgan_step(
     config: CGANArgs, # Your configuration class
-    data_transformer=None, data_sampler=None, df_val=None,
-     X_val=None, y_val=None
+    data_transformer=None, data_sampler=None, np_val_transformed=None
 ) -> ReturnType: # Returns path to the best model's state_dict (ZenML output)
 
     current_run = mlflow.active_run()
@@ -51,7 +50,7 @@ def train_evaluate_cgan_step(
         device=config.device,
         config=config,
     )
-    best_model_data_to_save = model.fit(run_id, data_transformer, data_sampler, df_val, X_val, y_val, config=config)
+    best_model_data_to_save = model.fit(run_id, data_transformer, data_sampler, np_val_transformed, config=config)
 
 
 
